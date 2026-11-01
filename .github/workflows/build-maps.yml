@@ -1,0 +1,76 @@
+name: Build desert maps
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure release maps-v1 exists
+        env: {GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
+        run: gh release view maps-v1 -R "$GITHUB_REPOSITORY" || gh release create maps-v1 -R "$GITHUB_REPOSITORY" -t maps-v1 -n "maps for desert app"
+
+  maps:
+    needs: prep
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - {n: saudi_north, pbf: "asia/gcc-states asia/jordan asia/iraq", bbox: "34.5,25.5,55.7,32.5"}
+          - {n: saudi_south, pbf: "asia/gcc-states asia/yemen",            bbox: "34.5,16.0,51.0,25.6"}
+          - {n: jordan,      pbf: "asia/jordan",                           bbox: "34.8,29.1,39.3,33.4"}
+          - {n: uae,         pbf: "asia/gcc-states",                       bbox: "51.5,22.6,56.4,26.1"}
+          - {n: oman,        pbf: "asia/gcc-states asia/yemen",            bbox: "52.0,16.6,59.9,26.4"}
+          - {n: qatar,       pbf: "asia/gcc-states",                       bbox: "50.7,24.5,51.7,26.2"}
+          - {n: kuwait,      pbf: "asia/gcc-states asia/iraq",             bbox: "46.5,28.5,48.5,30.1"}
+          - {n: bahrain,     pbf: "asia/gcc-states",                       bbox: "50.3,25.5,50.8,26.4"}
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y osmium-tool osmosis curl
+          mkdir -p ~/.openstreetmap/osmosis/plugins
+          curl -fL https://repo1.maven.org/maven2/org/mapsforge/mapsforge-map-writer/0.21.0/mapsforge-map-writer-0.21.0-jar-with-dependencies.jar -o ~/.openstreetmap/osmosis/plugins/mapsforge-map-writer.jar
+      - name: Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Download and merge PBF
+        run: |
+          for p in ${{ matrix.pbf }}; do
+            curl -fL "https://download.geofabrik.de/$p-latest.osm.pbf" -o "$(basename $p).osm.pbf"
+          done
+          if [ $(ls *.osm.pbf | wc -l) -gt 1 ]; then osmium merge *.osm.pbf -o src.pbf; else mv *.osm.pbf src.pbf; fi
+      - name: Extract and write map
+        env:
+          JAVACMD_OPTIONS: "-Xmx10g"
+          JAVA_OPTS: "-Xmx10g"
+        run: |
+          B="${{ matrix.bbox }}"
+          osmium extract -b "$B" src.pbf -o part.pbf --overwrite
+          rm -f src.pbf
+          osmosis --rb file=part.pbf --mapfile-writer file="${{ matrix.n }}.map" type=hd bbox="$(echo $B | awk -F, '{print $2","$1","$4","$3}')" preferred-languages=ar,en zoom-interval-conf=5,0,7,10,8,11,14,12,21
+          ls -la "${{ matrix.n }}.map"
+      - name: Upload to release
+        env: {GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
+        run: gh release upload maps-v1 "${{ matrix.n }}.map" --clobber -R "$GITHUB_REPOSITORY"
+
+  routing:
+    needs: prep
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download routing segments
+        run: |
+          mkdir out
+          for s in E30_N25 E30_N30 E35_N15 E35_N20 E35_N25 E35_N30 E40_N15 E40_N20 E40_N25 E40_N30 E45_N15 E45_N20 E45_N25 E45_N30 E50_N15 E50_N20 E50_N25 E50_N30 E55_N15 E55_N20 E55_N25; do
+            curl -fL "https://brouter.de/brouter/segments4/$s.rd5" -o "out/$s.rd5" || echo "missing $s"
+          done
+          ls -la out
+      - name: Upload to release
+        env: {GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
+        run: gh release upload maps-v1 out/*.rd5 --clobber -R "$GITHUB_REPOSITORY"
